@@ -1,22 +1,12 @@
-# EXPLORER AGENT
-# @Author: Tacla, UTFPR
-#
-### It walks randomly in the environment looking for victims. When half of the
-### exploration has gone, the explorer goes back to the base.
-
 import sys
 import os
 import random
 import math
 import heapq
-from abc import ABC, abstractmethod
+from abc import ABC
 from vs.abstract_agent import AbstAgent
 from vs.constants import VS
 from map import Map
-
-
-
-
 
 class Stack:
     def __init__(self):
@@ -34,141 +24,137 @@ class Stack:
 
 class Explorer(AbstAgent):
     def __init__(self, env, config_file, resc):
-        """ Construtor do agente random on-line
-        @param env: a reference to the environment 
-        @param config_file: the absolute path to the explorer's config file
-        @param resc: a reference to the rescuer agent to invoke when exploration finishes
-        """
-
         super().__init__(env, config_file)
-        self.walk_stack = Stack()  # a stack to store the movements
-        self.set_state(VS.ACTIVE)  # explorer is active since the begin
-        self.resc = resc           # reference to the rescuer agent
-        self.x = 0                 # current x position relative to the origin 0
-        self.y = 0                 # current y position relative to the origin 0
-        self.map = Map()           # create a map for representing the environment
-        self.victims = {}          # a dictionary of found victims: (seq): ((x,y), [<vs>])
-                                   # the key is the seq number of the victim,(x,y) the position, <vs> the list of vital signals
+        self.walk_stack = Stack()
+        self.set_state(VS.ACTIVE)
+        self.resc = resc
+        self.x = 0
+        self.y = 0
+        self.map = Map()
+        self.victims = {}
 
-        # put the current position - the base - in the map
+        # Put the current position (base) in the map
         self.map.add((self.x, self.y), 1, VS.NO_VICTIM, self.check_walls_and_lim())
 
     def get_next_position(self):
-        """ Uses Depth-First Search (DFS) algorithm to get the next position that can be explored
-            There must be at least one CLEAR position in the neighborhood, otherwise it loops forever.
-        """
-        # Check the neighborhood walls and grid limits
         obstacles = self.check_walls_and_lim()
-
-        # Define directions for DFS (clockwise starting from up)
-        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
-
-        # Initialize a visited set to keep track of visited positions
+        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # Clockwise starting from up
         visited = set()
-        stack = [(self.x, self.y)]  # Stack for DFS starting from the current position
+        stack = [(self.x, self.y)]
 
-        # DFS loop
         while stack:
             x, y = stack.pop()
             visited.add((x, y))
+            random.shuffle(directions)
 
             for dx, dy in directions:
                 nx, ny = x + dx, y + dy
                 if (nx, ny) not in visited and self.is_clear_position(obstacles, nx, ny):
                     return dx, dy  # Found a clear position, return the direction
-
-                    # Add the neighboring position to the stack for further exploration
                     stack.append((nx, ny))
-        
-        # If no clear position found, return a random direction
+
         return random.choice([(0, -1), (1, 0), (0, 1), (-1, 0)])  # Default to random if DFS fails
 
-    def is_clear_position(self, obstacles, x, y):
-        """ Check if the position (x, y) is clear based on the obstacles data """
-        if isinstance(obstacles, list) and len(obstacles) > x and isinstance(obstacles[0], list) and len(obstacles[0]) > y:
-            return obstacles[x][y] == VS.CLEAR
+    def is_clear_position(self, obstacles, x, y, can_jump=False):
+        if isinstance(obstacles, list) and obstacles:
+            if isinstance(obstacles[0], list) and obstacles[0]:
+                if 0 <= x < len(obstacles) and 0 <= y < len(obstacles[0]):
+                    if can_jump:
+                        return True  # Consider the position as clear if the agent can jump over obstacles
+                    else:
+                        return obstacles[x][y] == 0  # Consider the position as clear only if there is no obstacle
         return False
-        
-    def explore(self):
-        # get an random increment for x and y       
-        dx, dy = self.get_next_position()
 
-        # Moves the body to another position
+    def explore(self):
+        dx, dy = self.get_next_position()
         rtime_bef = self.get_rtime()
         result = self.walk(dx, dy)
         rtime_aft = self.get_rtime()
 
-        # Test the result of the walk action
-        # Should never bump, but for safe functionning let's test
-        if result == VS.BUMPED:
-            # update the map with the wall
-            self.map.add((self.x + dx, self.y + dy), VS.OBST_WALL, VS.NO_VICTIM, self.check_walls_and_lim())
-            #print(f"{self.NAME}: Wall or grid limit reached at ({self.x + dx}, {self.y + dy})")
-
         if result == VS.EXECUTED:
-            # check for victim returns -1 if there is no victim or the sequential
-            # the sequential number of a found victim
             self.walk_stack.push((dx, dy))
-
-            # update the agent's position relative to the origin
             self.x += dx
-            self.y += dy          
+            self.y += dy
 
-            # Check for victims
             seq = self.check_for_victim()
             if seq != VS.NO_VICTIM:
                 vs = self.read_vital_signals()
                 self.victims[vs[0]] = ((self.x, self.y), vs)
                 print(f"{self.NAME} Victim found at ({self.x}, {self.y}), rtime: {self.get_rtime()}")
-                #print(f"{self.NAME} Seq: {seq} Vital signals: {vs}")
-            
-            # Calculates the difficulty of the visited cell
+
             difficulty = (rtime_bef - rtime_aft)
             if dx == 0 or dy == 0:
                 difficulty = difficulty / self.COST_LINE
             else:
                 difficulty = difficulty / self.COST_DIAG
 
-            # Update the map with the new cell
             self.map.add((self.x, self.y), difficulty, seq, self.check_walls_and_lim())
-            #print(f"{self.NAME}:at ({self.x}, {self.y}), diffic: {difficulty:.2f} vict: {seq} rtime: {self.get_rtime()}")
-
-        return
 
     def come_back(self):
-        dx, dy = self.walk_stack.pop()
-        dx = dx * -1
-        dy = dy * -1
+        start = (self.x, self.y)
+        end = (0, 0)
+        path = self.a_star(start, end)
 
-        result = self.walk(dx, dy)
-        if result == VS.BUMPED:
-            print(f"{self.NAME}: when coming back bumped at ({self.x+dx}, {self.y+dy}) , rtime: {self.get_rtime()}")
-            return
-        
-        if result == VS.EXECUTED:
-            # update the agent's position relative to the origin
-            self.x += dx
-            self.y += dy
-            #print(f"{self.NAME}: coming back at ({self.x}, {self.y}), rtime: {self.get_rtime()}")
-        
+        if path is None:
+            print("Error: A* failed to find a path back to the base")
+            return 
+
+        for position in path:
+            dx = position[0] - self.x
+            dy = position[1] - self.y
+            result = self.walk(dx, dy)
+            if result != VS.EXECUTED:
+                print(f"Error: Unable to execute step ({dx}, {dy}) in A* path")
+                return
+
+            # Debugging: Print map state after each step
+            print("Current Map State:")
+            self.map.print_map()  # Assuming a method like this exists in your Map class
+
+        self.x, self.y = end
+        self.resc.go_save_victims(self.map, self.victims)
+
+    def a_star(self, start, end):
+        def heuristic(pos):
+            return abs(pos[0] - end[0]) + abs(pos[1] - end[1])
+
+        open_set = [(0, start)]
+        came_from = {}
+        g_score = {start: 0}
+
+        while open_set:
+            current_cost, current_pos = heapq.heappop(open_set)
+
+            if current_pos == end:
+                path = []
+                while current_pos in came_from:
+                    path.append(current_pos)
+                    current_pos = came_from[current_pos]
+                return path[::-1]
+
+            for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:
+                neighbor = (current_pos[0] + dx, current_pos[1] + dy)
+                new_cost = g_score[current_pos] + 1
+
+                if self.is_clear_position([], neighbor[0], neighbor[1]):
+                    if neighbor not in g_score or new_cost < g_score[neighbor]:
+                        g_score[neighbor] = new_cost
+                        f_score = new_cost + heuristic(neighbor)
+                        heapq.heappush(open_set, (f_score, neighbor))
+                        came_from[neighbor] = current_pos
+
+        return None
+
     def deliberate(self) -> bool:
-        """ The agent chooses the next action. The simulator calls this
-        method at each cycle. Must be implemented in every agent"""
-
         consumed_time = self.TLIM - self.get_rtime()
         if consumed_time < self.get_rtime():
             self.explore()
             return True
 
-        # time to come back to the base
         if self.walk_stack.is_empty() or (self.x == 0 and self.y == 0):
-            # time to wake up the rescuer
-            # pass the walls and the victims (here, they're empty)
             print(f"{self.NAME}: rtime {self.get_rtime()}, invoking the rescuer")
-            #input(f"{self.NAME}: type [ENTER] to proceed")
             self.resc.go_save_victims(self.map, self.victims)
             return False
 
         self.come_back()
         return True
-
